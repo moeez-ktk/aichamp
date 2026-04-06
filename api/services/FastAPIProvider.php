@@ -107,66 +107,78 @@ class FastAPIProvider implements AIProvider {
      */
     public function chatCompletionsBatch($messages, $targets, $options = []) {
         set_time_limit(600);
-        $normalizedMessages = $this->normalizeMessages($messages);
-
-        $payload = [
-            'session_id' => $options['session_id'] ?? 'none',
-            'user_id'    => $options['user_id'] ?? 'none',
-            'messages'   => $normalizedMessages,
-            // Required by schema even in batch mode; use first target as default
-            'model'      => $targets[0]['model'] ?? 'default',
-            'provider'   => $targets[0]['provider'] ?? 'ollama',
-            'context_data' => !empty($options['context_data']) ? $options['context_data'] : new \stdClass(),
-            'options'    => !empty($options['llm_options']) ? $options['llm_options'] : new \stdClass(),
-            'targets'    => array_map(fn($t) => [
+ 
+        if (empty($targets)) {
+            throw new \Exception("No targets provided for batch completion");
+        }
+ 
+        // Build the targets payload — each target carries its own normalised messages
+        $targetsPayload = array_map(function ($t) {
+            return [
                 'model'    => $t['model'],
                 'provider' => $t['provider'],
                 'model_id' => $t['model_id'],
-            ], $targets),
+                // Per-model conversation history (may be empty for a brand-new model)
+                'messages' => array_values($this->normalizeMessages($t['messages'] ?? [])),
+            ];
+        }, $targets);
+ 
+        // Use the first target's model/provider as the required top-level schema fields
+        $firstTarget = $targets[0];
+ 
+        $payload = [
+            'session_id'   => $options['session_id'] ?? 'none',
+            'user_id'      => $options['user_id'] ?? 'none',
+            // Top-level messages: send the first model's messages so the Python
+            // schema validator is happy; Python will use per-target messages instead.
+            'messages'     => array_values($this->normalizeMessages($firstTarget['messages'] ?? [])),
+            'model'        => $firstTarget['model'] ?? 'default',
+            'provider'     => $firstTarget['provider'] ?? 'ollama',
+            'context_data' => !empty($options['context_data']) ? $options['context_data'] : new \stdClass(),
+            'options'      => !empty($options['llm_options']) ? $options['llm_options'] : new \stdClass(),
+            'targets'      => $targetsPayload,
         ];
-
+ 
         $url = rtrim($this->baseUrl, '/') . '/v1/chat/completions/batch';
-
+ 
         $ch = curl_init($url);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_POST, true);
         curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
         curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
         curl_setopt($ch, CURLOPT_TIMEOUT, 300);
-
+ 
         $response = curl_exec($ch);
         $error    = curl_error($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
-
+ 
         if ($error) {
-            throw new Exception("Batch request to Python AI Engine failed: " . $error);
+            throw new \Exception("Batch request to Python AI Engine failed: " . $error);
         }
-
+ 
         $data = json_decode($response, true);
-
+ 
         if ($httpCode !== 200) {
             $errorMsg = is_array($data) && isset($data['detail'])
                 ? json_encode($data['detail'])
                 : $response;
-            throw new Exception("Python AI Engine Batch Error ($httpCode): " . $errorMsg);
+            throw new \Exception("Python AI Engine Batch Error ($httpCode): " . $errorMsg);
         }
-
-        // $data['results'] is keyed by model_id (PHP UUID)
-        // Normalize each result into the same format as chatCompletions()
+ 
+        // $data['results'] is keyed by model_id (PHP UUID).
+        // Normalise each result into the same format as chatCompletions().
         $results = [];
         foreach ($data['results'] as $modelId => $result) {
             $results[$modelId] = [
-                'choices' => [
-                    [
-                        'message' => [
-                            'content' => $result['content'] ?? '',
-                            'role'    => 'assistant'
-                        ]
-                    ]
-                ],
-                'usage'    => $result['usage'] ?? ['prompt_tokens' => 0, 'completion_tokens' => 0, 'total_tokens' => 0],
-                'metadata' => $result['metadata'] ?? []
+                'choices'  => [[
+                    'message' => [
+                        'content' => $result['content'] ?? '',
+                        'role'    => 'assistant',
+                    ],
+                ]],
+                'usage'    => $result['usage']    ?? ['prompt_tokens' => 0, 'completion_tokens' => 0, 'total_tokens' => 0],
+                'metadata' => $result['metadata'] ?? [],
             ];
         }
         return $results;

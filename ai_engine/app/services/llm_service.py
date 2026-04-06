@@ -5,7 +5,7 @@ import httpx
 import os
 import json
 import traceback
-from app.schemas.chat import ChatRequest, ChatResponse
+from app.schemas.chat import ChatRequest, ChatResponse, ModelTarget
 from app.services.rag_service import RAGService
 
 class LLMService:
@@ -65,44 +65,83 @@ class LLMService:
             raise e
 
     @staticmethod
-    async def process_chat_batch(request: ChatRequest) -> dict:
+    async def process_chat_batch(request: "ChatRequest") -> dict:
         """
         Run all targets in parallel using asyncio.gather.
-        RAG embedding is computed once and shared.
-        Returns dict keyed by model_id (PHP UUID).
+ 
+        FIXED: Each target now carries its own 'messages' (per-model history).
+        RAG embedding is computed once on the *current user turn* and the
+        retrieved context is injected into each model's individual system
+        prompt — so context is shared but conversation history is isolated.
         """
         print(f"--- Batch Processing {len(request.targets)} models in parallel ---")
-
-        # Run RAG once for all models
-        messages_base, sources = await LLMService._build_context(request)
-
-        async def _call_single(target):
-            # Clone request fields, override model/provider for this target
-            single = ChatRequest(
-                session_id=request.session_id,
-                user_id=request.user_id,
-                messages=request.messages,
-                model=target.model,
-                provider=target.provider,
-                context_data=request.context_data,
-                options=request.options,
-            )
+ 
+        # ── Step 1: Run RAG once for the current user query ───────────────────
+        # We use the last message in the top-level messages list as the query.
+        user_query = request.messages[-1].content if request.messages else ""
+        context_str = ""
+        sources: list[str] = []
+ 
+        try:
+            query_emb = await RAGService.get_embedding(user_query)
+            search_results = RAGService.search(query_emb, request.session_id)
+ 
+            context_parts = []
+            for chunk, meta, score in search_results:
+                if score > 0.3:
+                    context_parts.append(f"[File: {meta['source']}]\n{chunk}")
+                    sources.append(meta['source'])
+ 
+            if context_parts:
+                context_str = "\n\n---\n\n".join(context_parts)
+        except Exception as e:
+            print(f"RAG Error (Non-Fatal): {e}")
+ 
+        # ── Step 2: Call each model with its own per-model history ────────────
+        async def _call_single(target: "ModelTarget"):
             try:
-                if target.provider.startswith("openrouter"):
-                    response = await LLMService._call_openrouter(single, messages_base, sources)
+                # ── Build this model's message list ───────────────────────────
+                # Use the target's own messages (its isolated history).
+                # Fall back to the top-level messages if the target has none
+                # (e.g. first-ever message in the session).
+                per_model_messages = target.messages if target.messages else request.messages
+ 
+                # Inject RAG context as a system prompt prepended to the history
+                if context_str:
+                    system_msg = {"role": "system", "content": f"You are ScholarAI. DOCUMENT CONTEXT:\n{context_str}"}
                 else:
-                    response = await LLMService._call_ollama(single, messages_base, sources)
+                    system_msg = {"role": "system", "content": "You are ScholarAI, an intelligent research assistant."}
+ 
+                messages_with_system = [system_msg] + [m.dict() for m in per_model_messages]
+ 
+                # ── Build a single-model ChatRequest for the provider call ─────
+                single = ChatRequest(
+                    session_id=request.session_id,
+                    user_id=request.user_id,
+                    messages=per_model_messages,   # per-model history
+                    model=target.model,
+                    provider=target.provider,
+                    context_data=request.context_data,
+                    options=request.options,
+                )
+ 
+                if target.provider.startswith("openrouter"):
+                    response = await LLMService._call_openrouter(single, messages_with_system, sources)
+                else:
+                    response = await LLMService._call_ollama(single, messages_with_system, sources)
+ 
                 return target.model_id, response
+ 
             except Exception as e:
                 print(f"Error for model {target.model}: {e}")
+                import traceback
                 traceback.print_exc()
-                # Return an error response so other models still succeed
                 return target.model_id, ChatResponse(
                     content=f"Error: {str(e)}",
                     model=target.model,
-                    metadata={"error": str(e)}
+                    metadata={"error": str(e)},
                 )
-
+ 
         results_list = await asyncio.gather(*[_call_single(t) for t in request.targets])
         return {model_id: response for model_id, response in results_list}
 

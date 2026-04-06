@@ -10,6 +10,7 @@ class ModelTarget(BaseModel):
     model: str
     provider: str
     model_id: str  # PHP's UUID for this model
+    messages: Optional[List[ChatMessage]] = Field(default_factory=list)
 
 class ChatRequest(BaseModel):
     session_id: str
