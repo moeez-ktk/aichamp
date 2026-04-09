@@ -47,6 +47,7 @@ const Dashboard = ({
             }));
 
             const msgMap = {};
+            const visibleModelIds = mappedModels.filter(m => m.visible === 1).map(m => m.id);
             mappedModels.forEach((m) => {
               msgMap[m.id] = [];
               bottomRefs.current[m.id] = bottomRefs.current[m.id] || React.createRef();
@@ -61,7 +62,8 @@ const Dashboard = ({
              });
 
             sessionMessages?.forEach((msg) => {
-               if (msg.type === "response" && msgMap[msg.model_id]) {
+               // Only show messages for visible models
+               if (msg.type === "response" && msgMap[msg.model_id] && visibleModelIds.includes(msg.model_id)) {
                  const prompt = promptMap[msg.prompt_id];
                  if (prompt && !msgMap[msg.model_id].some(item => item.type === "prompt" && item.content === prompt.content)) {
                    // Include file_name from the stored prompt if it exists
@@ -234,13 +236,18 @@ const Dashboard = ({
     });
     setLoadingModels(loaders);
 
+    const visibleModelsList = models.filter(m => m.visible === 1);
+    const visibleModelIds = visibleModelsList.map(m => m.id);
+
     const newMessages = { ...messages };
-    Object.keys(newMessages).forEach((id) => {
-      newMessages[id].push({ 
-        type: "prompt", 
-        content: prompt,
-        file: selectedFile ? { name: selectedFile.name } : null
-      });
+    visibleModelIds.forEach((id) => {
+      if (newMessages[id]) {
+        newMessages[id].push({ 
+          type: "prompt", 
+          content: prompt,
+          file: selectedFile ? { name: selectedFile.name } : null
+        });
+      }
     });
     setMessages({ ...newMessages });
 

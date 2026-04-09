@@ -104,10 +104,9 @@ const Login = () => {
           </form>
 
           <div className="auth-footer">
-            <p>
+            <p className="auth-footer-links">
               Don't have an account? <Link to="/signup" className="auth-link">Create account</Link>
-            </p>
-            <p>
+              <span className="auth-divider">|</span>
               <Link to="/forgot-password" className="auth-link">Forgot Password?</Link>
             </p>
           </div>

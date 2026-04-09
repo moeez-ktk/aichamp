@@ -111,7 +111,7 @@ const Sidebar = ({ sessions, setSessions, onSessionChange }) => {
     setDeleting(true);
     try {
       await sessionService.deleteSession(deleteTarget.id);
-
+      handleNew(); 
       setSessions((prev) =>
         prev.filter((s) => s.id !== deleteTarget.id)
       );
